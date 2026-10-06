@@ -881,7 +881,7 @@ mod tests {
                             ..Default::default()
                         }],
                         ..Default::default()
-                    })],
+                    }, false, false)],
                     push_names: Vec::new(),
                     lids: Vec::new(),
                     stickers: Vec::new(),
@@ -986,7 +986,7 @@ mod tests {
                 msg_order_id: None,
             }],
             ..Default::default()
-        });
+        }, false, false);
         worker.apply_history(
             ParsedHistory {
                 chats: vec![parsed],
@@ -1013,7 +1013,7 @@ mod tests {
         let raw = creation_archive(&content(), &[7; 32]);
         assert_eq!(secret(&raw), Some([7; 32].as_slice()));
         assert!(raw.poll_creation_message_v3.is_set());
-        assert_eq!(classify(&raw), Some(content()));
+        assert_eq!(classify(&raw, false), Some(content()));
         let options = vec!["Pizza".into(), " Pizza ".into()];
         let hash = whatsapp_rust::wacore::poll::compute_option_hash(" Pizza ").to_vec();
         assert_eq!(choices_for(&options, &[hash]), Some(vec![1]));

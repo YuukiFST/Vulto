@@ -1129,7 +1129,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            classify(&message),
+            classify(&message, false),
             Some(Content::StickerPack {
                 name: "Ducks".into(),
                 publisher: "Ada".into(),

@@ -5,10 +5,11 @@ use std::borrow::Cow;
 use egui::{Align, CornerRadius, Frame, Layout, Margin, Rect, Stroke, Vec2, pos2, vec2};
 
 use crate::app::App;
+use crate::backend::Command;
 use crate::i18n::Locale;
 use crate::model::{Action, Dialog, Page};
 use crate::privacy::{PrivacyChoice, PrivacyKind};
-use crate::settings::{Settings, ThemeChoice, WallpaperColor};
+use crate::settings::{AccountSettings, Settings, ThemeChoice, WallpaperColor};
 use crate::theme::{self, Icon, Palette};
 use crate::wallpaper;
 
@@ -515,6 +516,54 @@ fn sections(app: &App) -> Vec<Section> {
         translated(locale, "Show when you are typing"),
         "",
         |settings| &mut settings.send_typing,
+    );
+    privacy.row(
+        translated(locale, "Unlimited view-once"),
+        translated(
+            locale,
+            "View once media stays as normal media and never sends a view receipt.",
+        ),
+        |ui, app| {
+            backend_account_toggle(
+                ui,
+                app,
+                "Unlimited view-once",
+                |settings| &mut settings.view_once_unlimited,
+                Command::SetViewOnceUnlimited,
+            );
+        },
+    );
+    privacy.row(
+        translated(locale, "Ghost mode"),
+        translated(
+            locale,
+            "No read receipts, no played receipts, no typing, stays offline.",
+        ),
+        |ui, app| {
+            backend_account_toggle(
+                ui,
+                app,
+                "Ghost mode",
+                |settings| &mut settings.ghost_mode,
+                Command::SetGhostMode,
+            );
+        },
+    );
+    privacy.row(
+        translated(locale, "Keep deleted messages"),
+        translated(
+            locale,
+            "Revoked and deleted messages stay visible here.",
+        ),
+        |ui, app| {
+            backend_account_toggle(
+                ui,
+                app,
+                "Keep deleted messages",
+                |settings| &mut settings.keep_deleted_messages,
+                Command::SetKeepDeleted,
+            );
+        },
     );
     app_lock_rows(app, &mut privacy);
     // The account values live on the phone: they are shown once fetched and
@@ -1682,6 +1731,29 @@ fn account_toggle(
     if changed {
         *field(&mut app.account_mut().settings) = value;
         app.account_mut().mark_settings_dirty();
+    }
+}
+
+/// A switch bound to the active account that also forwards its value to the
+/// backend, for settings the worker enforces on live traffic.
+fn backend_account_toggle(
+    ui: &mut egui::Ui,
+    app: &mut App,
+    label: &str,
+    field: impl Fn(&mut AccountSettings) -> &mut bool,
+    command: impl Fn(bool) -> Command,
+) {
+    let palette = app.palette;
+    let mut value = *field(&mut app.account_mut().settings);
+    let response = widgets::switch(ui, &palette, &mut value);
+    theme::reveal_focus(&response);
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), value, label)
+    });
+    if response.changed() {
+        *field(&mut app.account_mut().settings) = value;
+        app.account_mut().mark_settings_dirty();
+        app.account().backend.send(command(value));
     }
 }
 

@@ -881,6 +881,15 @@ impl App {
             account.backend.send(Command::SetKeepChatsArchived(
                 app.settings.keep_chats_archived,
             ));
+            account.backend.send(Command::SetViewOnceUnlimited(
+                account.settings.view_once_unlimited,
+            ));
+            account
+                .backend
+                .send(Command::SetGhostMode(account.settings.ghost_mode));
+            account.backend.send(Command::SetKeepDeleted(
+                account.settings.keep_deleted_messages,
+            ));
         }
         if crate::autostart::supported() {
             app.start_with_system = Some(crate::autostart::enabled());
@@ -1302,6 +1311,15 @@ impl App {
         ));
         account.backend.send(Command::SetKeepChatsArchived(
             self.settings.keep_chats_archived,
+        ));
+        account.backend.send(Command::SetViewOnceUnlimited(
+            account.settings.view_once_unlimited,
+        ));
+        account
+            .backend
+            .send(Command::SetGhostMode(account.settings.ghost_mode));
+        account.backend.send(Command::SetKeepDeleted(
+            account.settings.keep_deleted_messages,
         ));
         self.account_before_adding = Some(self.account().id.clone());
         self.park_composer();
@@ -3500,9 +3518,11 @@ impl App {
             known.marked_unread = false;
         }
         // Clear local unread state regardless of receipt settings.
+        // Ghost mode never sends read receipts.
         self.backend.send(Command::MarkRead {
             chat: chat.to_owned(),
-            receipts: self.account().settings.send_read_receipts,
+            receipts: self.account().settings.send_read_receipts
+                && !self.account().settings.ghost_mode,
         });
     }
 
@@ -3641,8 +3661,10 @@ impl App {
     /// Updates typing state after composer changes.
     pub fn note_keystroke(&mut self) {
         self.last_keystroke = Some(Instant::now());
+        // Ghost mode never shows typing.
         if !self.composing
             && self.account().settings.send_typing
+            && !self.account().settings.ghost_mode
             && let Some(chat) = self.open_chat.clone()
         {
             self.composing = true;
@@ -5738,7 +5760,8 @@ impl App {
         let looking = self.window_focused && !self.window_hidden;
         let active = self.active;
         for (index, account) in self.accounts.iter_mut().enumerate() {
-            let online = looking && index == active;
+            // Ghost mode stays offline even while the account is on screen.
+            let online = looking && index == active && !account.settings.ghost_mode;
             if account.reported_online != Some(online) {
                 account.reported_online = Some(online);
                 account.backend.send(Command::SetOnline(online));
@@ -6054,11 +6077,13 @@ impl App {
         }
         let sender = row.sender.clone();
         self.played_told.insert(message.clone());
+        // Ghost mode never sends played receipts.
         self.backend.send(Command::MarkPlayed {
             chat,
             message,
             sender,
-            receipts: self.account().settings.send_read_receipts,
+            receipts: self.account().settings.send_read_receipts
+                && !self.account().settings.ghost_mode,
         });
     }
 

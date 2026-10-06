@@ -442,6 +442,12 @@ pub struct Settings {
     /// with the phone's "Keep chats archived". Off, a new message brings the
     /// chat back to the list.
     pub keep_chats_archived: bool,
+    /// View-once media stays as normal media instead of a placeholder.
+    pub view_once_unlimited: bool,
+    /// No read/played receipts, no typing state, stays offline.
+    pub ghost_mode: bool,
+    /// Revoked and deleted messages stay visible here.
+    pub keep_deleted_messages: bool,
     /// Proxy for WhatsApp, media, and updates, such as
     /// `socks5h://127.0.0.1:9050`. Empty follows `ALL_PROXY` / `HTTPS_PROXY`.
     pub proxy: String,
@@ -523,6 +529,9 @@ impl Default for Settings {
             group_sounds: true,
             download_folder: None,
             keep_chats_archived: true,
+            view_once_unlimited: false,
+            ghost_mode: false,
+            keep_deleted_messages: false,
             proxy: String::new(),
             check_for_updates: true,
             download_updates_automatically: false,
@@ -734,6 +743,12 @@ pub struct AccountSettings {
     pub last_chat: Option<String>,
     pub notifications: bool,
     pub save_contacts_to_phone: bool,
+    /// View-once media stays as normal media instead of a placeholder.
+    pub view_once_unlimited: bool,
+    /// No read/played receipts, no typing state, stays offline.
+    pub ghost_mode: bool,
+    /// Revoked and deleted messages stay visible here.
+    pub keep_deleted_messages: bool,
     /// This account's copy of the chosen chat wallpaper image.
     pub wallpaper_image: Option<std::path::PathBuf>,
 }
@@ -747,6 +762,9 @@ impl Default for AccountSettings {
             last_chat: None,
             notifications: true,
             save_contacts_to_phone: true,
+            view_once_unlimited: false,
+            ghost_mode: false,
+            keep_deleted_messages: false,
             wallpaper_image: None,
         }
     }
@@ -761,6 +779,9 @@ impl AccountSettings {
             last_chat: settings.last_chat.clone(),
             notifications: settings.notifications,
             save_contacts_to_phone: settings.save_contacts_to_phone,
+            view_once_unlimited: settings.view_once_unlimited,
+            ghost_mode: settings.ghost_mode,
+            keep_deleted_messages: settings.keep_deleted_messages,
             wallpaper_image: settings.wallpaper_image.clone(),
         }
     }
