@@ -158,7 +158,7 @@ mod tests {
         };
         let message = reply(vec![text("Here you go:\n"), code, table, map]);
         assert_eq!(
-            classify(&message, false),
+            classify(&message),
             Some(Content::text(
                 "Here you go:\n\n```\nfn main() {}\n```\n\nPlanets\nName | Moons\nMars | 2"
             ))
@@ -173,7 +173,7 @@ mod tests {
         };
         for message in [reply(Vec::new()), reply(vec![map, text("  ")])] {
             assert_eq!(
-                classify(&message, false),
+                classify(&message),
                 Some(Content::Unsupported {
                     what: UNREADABLE.into()
                 })
@@ -220,7 +220,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            classify(&invocation, false),
+            classify(&invocation),
             Some(Content::text("@Meta AI what is a moth?"))
         );
         assert_eq!(mentioned_of(&invocation), ["fixture@bot"]);
@@ -237,19 +237,19 @@ mod tests {
             ..Default::default()
         };
         assert!(matches!(
-            classify(&unknown, false),
+            classify(&unknown),
             Some(Content::Unsupported { .. })
         ));
         let metadata = wa::Message {
             message_context_info: MessageField::some(wa::MessageContextInfo::default()),
             ..Default::default()
         };
-        assert_eq!(classify(&metadata, false), None);
+        assert_eq!(classify(&metadata), None);
         let key_share = wa::Message {
             sender_key_distribution_message: MessageField::some(Default::default()),
             message_context_info: MessageField::some(wa::MessageContextInfo::default()),
             ..Default::default()
         };
-        assert_eq!(classify(&key_share, false), None);
+        assert_eq!(classify(&key_share), None);
     }
 }

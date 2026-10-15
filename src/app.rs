@@ -881,9 +881,6 @@ impl App {
             account.backend.send(Command::SetKeepChatsArchived(
                 app.settings.keep_chats_archived,
             ));
-            account.backend.send(Command::SetViewOnceUnlimited(
-                account.settings.view_once_unlimited,
-            ));
             account
                 .backend
                 .send(Command::SetGhostMode(account.settings.ghost_mode));
@@ -1311,9 +1308,6 @@ impl App {
         ));
         account.backend.send(Command::SetKeepChatsArchived(
             self.settings.keep_chats_archived,
-        ));
-        account.backend.send(Command::SetViewOnceUnlimited(
-            account.settings.view_once_unlimited,
         ));
         account
             .backend

@@ -863,25 +863,28 @@ mod tests {
         ] {
             worker.apply_history(
                 ParsedHistory {
-                    chats: vec![parse_conversation(wa::Conversation {
-                        id: chat.into(),
-                        messages: vec![wa::HistorySyncMsg {
-                            message: MessageField::some(wa::WebMessageInfo {
-                                key: MessageField::some(wa::MessageKey {
-                                    id: Some(row.id.clone()),
-                                    remote_jid: Some(chat.into()),
-                                    participant: Some(row.sender.clone()),
-                                    from_me: Some(false),
+                    chats: vec![parse_conversation(
+                        wa::Conversation {
+                            id: chat.into(),
+                            messages: vec![wa::HistorySyncMsg {
+                                message: MessageField::some(wa::WebMessageInfo {
+                                    key: MessageField::some(wa::MessageKey {
+                                        id: Some(row.id.clone()),
+                                        remote_jid: Some(chat.into()),
+                                        participant: Some(row.sender.clone()),
+                                        from_me: Some(false),
+                                    }),
+                                    message: MessageField::some(raw.clone()),
+                                    message_timestamp: Some(row.timestamp as u64),
+                                    poll_updates: updates,
+                                    ..Default::default()
                                 }),
-                                message: MessageField::some(raw.clone()),
-                                message_timestamp: Some(row.timestamp as u64),
-                                poll_updates: updates,
                                 ..Default::default()
-                            }),
+                            }],
                             ..Default::default()
-                        }],
-                        ..Default::default()
-                    }, false, false)],
+                        },
+                        false,
+                    )],
                     push_names: Vec::new(),
                     lids: Vec::new(),
                     stickers: Vec::new(),
@@ -968,25 +971,28 @@ mod tests {
                 ..Default::default()
             })
             .collect();
-        let parsed = parse_conversation(wa::Conversation {
-            id: chat.into(),
-            messages: vec![wa::HistorySyncMsg {
-                message: MessageField::some(wa::WebMessageInfo {
-                    key: MessageField::some(wa::MessageKey {
-                        id: Some("poll".into()),
-                        remote_jid: Some(chat.into()),
-                        participant: Some(row.sender.clone()),
-                        from_me: Some(false),
+        let parsed = parse_conversation(
+            wa::Conversation {
+                id: chat.into(),
+                messages: vec![wa::HistorySyncMsg {
+                    message: MessageField::some(wa::WebMessageInfo {
+                        key: MessageField::some(wa::MessageKey {
+                            id: Some("poll".into()),
+                            remote_jid: Some(chat.into()),
+                            participant: Some(row.sender.clone()),
+                            from_me: Some(false),
+                        }),
+                        message: MessageField::some(raw),
+                        message_timestamp: Some(100),
+                        poll_updates: updates,
+                        ..Default::default()
                     }),
-                    message: MessageField::some(raw),
-                    message_timestamp: Some(100),
-                    poll_updates: updates,
-                    ..Default::default()
-                }),
-                msg_order_id: None,
-            }],
-            ..Default::default()
-        }, false, false);
+                    msg_order_id: None,
+                }],
+                ..Default::default()
+            },
+            false,
+        );
         worker.apply_history(
             ParsedHistory {
                 chats: vec![parsed],
@@ -1013,7 +1019,7 @@ mod tests {
         let raw = creation_archive(&content(), &[7; 32]);
         assert_eq!(secret(&raw), Some([7; 32].as_slice()));
         assert!(raw.poll_creation_message_v3.is_set());
-        assert_eq!(classify(&raw, false), Some(content()));
+        assert_eq!(classify(&raw), Some(content()));
         let options = vec!["Pizza".into(), " Pizza ".into()];
         let hash = whatsapp_rust::wacore::poll::compute_option_hash(" Pizza ").to_vec();
         assert_eq!(choices_for(&options, &[hash]), Some(vec![1]));

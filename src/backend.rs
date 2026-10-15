@@ -448,8 +448,6 @@ pub enum Command {
     /// Whether archived chats stay archived when a new message arrives or is
     /// sent; when not, a new message unarchives the chat here.
     SetKeepChatsArchived(bool),
-    /// Keeps view-once media as normal media instead of a placeholder.
-    SetViewOnceUnlimited(bool),
     /// Sends no read/played receipts, no typing state, and stays offline.
     SetGhostMode(bool),
     /// Keeps revoked and deleted messages visible here.

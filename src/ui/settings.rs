@@ -518,22 +518,6 @@ fn sections(app: &App) -> Vec<Section> {
         |settings| &mut settings.send_typing,
     );
     privacy.row(
-        translated(locale, "Unlimited view-once"),
-        translated(
-            locale,
-            "View once media stays as normal media and never sends a view receipt.",
-        ),
-        |ui, app| {
-            backend_account_toggle(
-                ui,
-                app,
-                "Unlimited view-once",
-                |settings| &mut settings.view_once_unlimited,
-                Command::SetViewOnceUnlimited,
-            );
-        },
-    );
-    privacy.row(
         translated(locale, "Ghost mode"),
         translated(
             locale,
@@ -551,10 +535,7 @@ fn sections(app: &App) -> Vec<Section> {
     );
     privacy.row(
         translated(locale, "Keep deleted messages"),
-        translated(
-            locale,
-            "Revoked and deleted messages stay visible here.",
-        ),
+        translated(locale, "Revoked and deleted messages stay visible here."),
         |ui, app| {
             backend_account_toggle(
                 ui,

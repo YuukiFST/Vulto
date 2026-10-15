@@ -556,7 +556,7 @@ mod tests {
     fn readable(message: &wa::Message) -> String {
         let wire = message.encode_to_vec();
         let decoded = wa::Message::decode_from_slice(&wire).unwrap();
-        match super::super::classify(decoded.get_base_message(), false) {
+        match super::super::classify(decoded.get_base_message()) {
             Some(Content::Interactive { text, .. }) => text,
             other => panic!("unexpected classification: {other:?}"),
         }

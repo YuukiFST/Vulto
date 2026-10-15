@@ -518,7 +518,6 @@ pub async fn run(
         presence_subscribed: HashSet::new(),
         download_folder: None,
         keep_chats_archived: true,
-        view_once_unlimited: false,
         ghost_mode: false,
         keep_deleted_messages: false,
         online_wanted: false,
@@ -824,8 +823,6 @@ struct Worker {
     /// Settings' "Keep chats archived". Off, a new message unarchives its
     /// chat here, as the phone does; WhatsApp sends no mutation for it.
     keep_chats_archived: bool,
-    /// View-once media is kept as normal media, never a placeholder.
-    view_once_unlimited: bool,
     /// Sends no receipts or typing state and stays offline.
     ghost_mode: bool,
     /// Revoked and deleted messages stay visible here.
@@ -1462,7 +1459,7 @@ impl Worker {
                 continue;
             };
             let base = message.get_base_message();
-            let Some(mut content) = classify(&message, self.view_once_unlimited) else {
+            let Some(mut content) = classify(&message) else {
                 continue;
             };
             let Ok(Some(existing)) = self.archive.message(&chat, &id) else {
@@ -1508,12 +1505,13 @@ impl Worker {
     /// download, into the view-once placeholder. Only rows without a local
     /// file change, and only their content: an edit flag stays as it was.
     fn backfill_view_once(&mut self) {
-        if self.view_once_unlimited {
-            self.backfill_view_once_unlimited();
-            return;
-        }
         const KEY: &str = "view_once_media";
-        if self.archive.meta(KEY).ok().flatten().as_deref() == Some("1") {
+        // The fork's former unlimited view-once setting filed view-once media
+        // as attachments, which never download either: those rows go back to
+        // the placeholder once.
+        const UNLIMITED_KEY: &str = "view_once_unlimited";
+        let was_unlimited = self.archive.meta(UNLIMITED_KEY).ok().flatten().as_deref() == Some("1");
+        if !was_unlimited && self.archive.meta(KEY).ok().flatten().as_deref() == Some("1") {
             return;
         }
         let rows = match self.archive.media_with_raw() {
@@ -1528,7 +1526,7 @@ impl Worker {
             let Ok(message) = wa::Message::decode_from_slice(&raw) else {
                 continue;
             };
-            let Some(content @ Content::PhoneOnly { .. }) = classify(&message, false) else {
+            let Some(content @ Content::PhoneOnly { .. }) = classify(&message) else {
                 continue;
             };
             let Ok(Some(existing)) = self.archive.message(&chat, &id) else {
@@ -1550,63 +1548,9 @@ impl Worker {
             }
         }
         let _ = self.archive.set_meta(KEY, "1");
+        let _ = self.archive.set_meta(UNLIMITED_KEY, "0");
         if updated > 0 {
             log::info!("marked {updated} archived messages as view once");
-            self.emit_chats();
-        }
-    }
-
-    /// The inverse of [`Self::backfill_view_once`]: with unlimited view-once,
-    /// archived placeholders that still carry their raw protobuf become real
-    /// media again. Only rows without a local file change, and only their
-    /// content: an edit flag stays as it was.
-    fn backfill_view_once_unlimited(&mut self) {
-        const KEY: &str = "view_once_unlimited";
-        if self.archive.meta(KEY).ok().flatten().as_deref() == Some("1") {
-            return;
-        }
-        let rows = match self.archive.rows_with_raw() {
-            Ok(rows) => rows,
-            Err(error) => {
-                log::warn!("could not read the archive for view-once recovery: {error}");
-                return;
-            }
-        };
-        let mut updated = 0;
-        for (chat, id, raw) in rows {
-            let Ok(message) = wa::Message::decode_from_slice(&raw) else {
-                continue;
-            };
-            let Ok(Some(existing)) = self.archive.message(&chat, &id) else {
-                continue;
-            };
-            let Content::PhoneOnly { once: Some(_), .. } = existing.content else {
-                continue;
-            };
-            let Some(content) = classify(&message, true) else {
-                continue;
-            };
-            if matches!(content, Content::PhoneOnly { .. }) {
-                continue;
-            }
-            if existing
-                .content
-                .media()
-                .is_none_or(|media| media.path.is_some())
-            {
-                continue;
-            }
-            if self
-                .archive
-                .set_content(&chat, &id, &content, existing.edited)
-                .is_ok()
-            {
-                updated += 1;
-            }
-        }
-        let _ = self.archive.set_meta(KEY, "1");
-        if updated > 0 {
-            log::info!("restored {updated} archived view-once messages as normal media");
             self.emit_chats();
         }
     }
@@ -3248,7 +3192,7 @@ impl Worker {
                 }
                 Some(Type::MESSAGE_EDIT) => {
                     if let Some(edited) = protocol.edited_message.as_option()
-                        && let Some(mut content) = classify(edited, self.view_once_unlimited)
+                        && let Some(mut content) = classify(edited)
                     {
                         // Preserve downloaded media when updating a caption.
                         if let Ok(Some(existing)) = self.archive.message(&chat, &target) {
@@ -3298,7 +3242,7 @@ impl Worker {
         if self.update_live_location(&chat, &sender, base, info) {
             return;
         }
-        let Some(mut content) = classify(message, self.view_once_unlimited) else {
+        let Some(mut content) = classify(message) else {
             return;
         };
         if let Content::PhoneOnly { live_location, .. } = &mut content
@@ -3743,16 +3687,12 @@ impl Worker {
                     once: None,
                 },
                 // The phone never shares these with linked devices, so do not
-                // suggest that the message is still on its way. With unlimited
-                // view-once there is no placeholder: without bytes the message
-                // is unsupported, never phone-only.
-                wa_events::UnavailableType::ViewOnce if !self.view_once_unlimited => {
-                    Content::PhoneOnly {
-                        view_once: true,
-                        live_location: false,
-                        once: None,
-                    }
-                }
+                // suggest that the message is still on its way.
+                wa_events::UnavailableType::ViewOnce => Content::PhoneOnly {
+                    view_once: true,
+                    live_location: false,
+                    once: None,
+                },
                 wa_events::UnavailableType::Hosted | wa_events::UnavailableType::Bot => {
                     Content::PhoneOnly {
                         view_once: false,
@@ -3908,7 +3848,7 @@ impl Worker {
             .map(|quoted| {
                 let base = quoted.get_base_message();
                 (
-                    classify(quoted, self.view_once_unlimited)
+                    classify(quoted)
                         .map(|content| content.summary())
                         .unwrap_or_default(),
                     self.mentions_of(&mentioned_of(base)),
@@ -4014,12 +3954,9 @@ impl Worker {
             }
         }
         let compressed = lazy.compressed_bytes().clone();
-        let view_once_unlimited = self.view_once_unlimited;
         let keep_deleted = self.keep_deleted_messages;
-        let parsed = tokio::task::spawn_blocking(move || {
-            parse_history(&compressed, view_once_unlimited, keep_deleted)
-        })
-        .await;
+        let parsed =
+            tokio::task::spawn_blocking(move || parse_history(&compressed, keep_deleted)).await;
         match parsed {
             Ok(Ok(parsed)) => {
                 if on_demand {
@@ -4859,9 +4796,6 @@ impl Worker {
                 self.download_folder = folder;
             }
             Command::SetKeepChatsArchived(keep) => self.keep_chats_archived = keep,
-            Command::SetViewOnceUnlimited(unlimited) => {
-                self.view_once_unlimited = unlimited;
-            }
             Command::SetGhostMode(ghost) => {
                 self.ghost_mode = ghost;
                 if ghost {
@@ -8316,12 +8250,11 @@ fn live_location_newer(share: &Message, incoming: &Content) -> bool {
 /// traffic. Takes the whole message, wrappers included: view-once media
 /// arrives wrapped, and WhatsApp keeps it for the phone, so a linked device
 /// shows a placeholder instead of an attachment that cannot be fetched.
-fn classify(message: &wa::Message, view_once_unlimited: bool) -> Option<Content> {
+fn classify(message: &wa::Message) -> Option<Content> {
     let content = classify_base(message.get_base_message())?;
     // Interactive messages travel in the same wrapper, so only media turns
-    // into a placeholder. Unlimited view-once keeps media as media.
-    if !view_once_unlimited
-        && message.is_view_once()
+    // into a placeholder.
+    if message.is_view_once()
         && let Some(kind) = crate::model::OnceMedia::of(&content)
     {
         return Some(Content::PhoneOnly {
@@ -9167,11 +9100,7 @@ pub(super) async fn file_outbound(
 }
 
 /// Decodes a history chunk off the worker thread.
-fn parse_history(
-    compressed: &[u8],
-    view_once_unlimited: bool,
-    keep_deleted: bool,
-) -> Result<ParsedHistory, String> {
+fn parse_history(compressed: &[u8], keep_deleted: bool) -> Result<ParsedHistory, String> {
     let mut stream = HistorySyncStream::new(compressed, MAX_DECOMPRESSED);
     let mut chats = Vec::new();
     loop {
@@ -9180,11 +9109,7 @@ fn parse_history(
             Ok(None) => break,
             Err(error) => return Err(error.to_string()),
         };
-        chats.push(parse_conversation(
-            conversation,
-            view_once_unlimited,
-            keep_deleted,
-        ));
+        chats.push(parse_conversation(conversation, keep_deleted));
     }
     let remainder = stream.remainder().map_err(|error| error.to_string())?;
     let push_names = remainder
@@ -9205,11 +9130,7 @@ fn parse_history(
     })
 }
 
-fn parse_conversation(
-    conversation: wa::Conversation,
-    view_once_unlimited: bool,
-    keep_deleted: bool,
-) -> ParsedChat {
+fn parse_conversation(conversation: wa::Conversation, keep_deleted: bool) -> ParsedChat {
     let mut diagnostics = HistoryDiagnostics {
         entries: conversation.messages.len(),
         ..Default::default()
@@ -9361,14 +9282,12 @@ fn parse_conversation(
             });
             continue;
         }
-        let Some(mut content) = classify(message, view_once_unlimited) else {
+        let Some(mut content) = classify(message) else {
             diagnostics.unclassified += 1;
             continue;
         };
-        // Normalizing an edit must not remove an outer view-once restriction,
-        // unless view-once media stays as normal media on this account.
-        if !view_once_unlimited
-            && original.is_view_once()
+        // Normalizing an edit must not remove an outer view-once restriction.
+        if original.is_view_once()
             && let Some(kind) = crate::model::OnceMedia::of(&content)
         {
             content = Content::PhoneOnly {
@@ -9429,7 +9348,7 @@ fn parse_conversation(
                 summary: context
                     .quoted_message
                     .as_option()
-                    .and_then(|quoted| classify(quoted, view_once_unlimited))
+                    .and_then(classify)
                     .map(|content| content.summary())
                     .unwrap_or_default(),
             })
@@ -10110,7 +10029,7 @@ mod tests {
     #[test]
     fn classification_covers_text_and_media() {
         let text = wa::Message::text("hello");
-        assert_eq!(classify(&text, false), Some(Content::text("hello")));
+        assert_eq!(classify(&text), Some(Content::text("hello")));
         let image = wa::Message {
             image_message: whatsapp_rust::prelude::MessageField::some(wa::message::ImageMessage {
                 caption: Some("look".into()),
@@ -10123,7 +10042,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        match classify(&image, false) {
+        match classify(&image) {
             Some(Content::Image { caption, media }) => {
                 assert_eq!(caption.as_deref(), Some("look"));
                 assert_eq!(media.mime, "image/jpeg");
@@ -10132,7 +10051,7 @@ mod tests {
             other => panic!("unexpected {other:?}"),
         }
         assert_eq!(thumbnail_of(&image), Some(vec![0xff, 0xd8]));
-        assert_eq!(classify(&wa::Message::default(), false), None);
+        assert_eq!(classify(&wa::Message::default()), None);
     }
 
     #[test]
@@ -10150,7 +10069,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        match classify(&live, false) {
+        match classify(&live) {
             Some(Content::LiveLocation {
                 latitude,
                 longitude,
@@ -10183,7 +10102,7 @@ mod tests {
             ..Default::default()
         };
         assert!(matches!(
-            classify(&start, false),
+            classify(&start),
             Some(Content::LiveLocation {
                 sequence: 0,
                 ended: false,
@@ -10200,7 +10119,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        assert!(matches!(classify(&pinned, false), Some(Content::Location { .. })));
+        assert!(matches!(classify(&pinned), Some(Content::Location { .. })));
     }
 
     fn live_position(
@@ -10666,12 +10585,12 @@ mod tests {
             ptv_message: MessageField::some(clip.clone()),
             ..Default::default()
         };
-        assert!(note(classify(&round, false)));
+        assert!(note(classify(&round)));
         let plain = wa::Message {
             video_message: MessageField::some(clip),
             ..Default::default()
         };
-        assert!(!note(classify(&plain, false)));
+        assert!(!note(classify(&plain)));
     }
 
     #[test]
@@ -10686,7 +10605,7 @@ mod tests {
             ..Default::default()
         };
         assert!(matches!(
-            classify(&message, false),
+            classify(&message),
             Some(Content::Text { preview: None, .. })
         ));
     }
@@ -11067,7 +10986,7 @@ mod tests {
             image(Some(true)),
         ];
         for message in &wrapped {
-            assert_eq!(classify(message, false), placeholder(OnceMedia::Photo));
+            assert_eq!(classify(message), placeholder(OnceMedia::Photo));
         }
         let video = wa::Message {
             view_once_message_v2: MessageField::some(wrap(wa::Message {
@@ -11079,7 +10998,7 @@ mod tests {
             })),
             ..Default::default()
         };
-        assert_eq!(classify(&video, false), placeholder(OnceMedia::Video));
+        assert_eq!(classify(&video), placeholder(OnceMedia::Video));
         let audio = |ptt| wa::Message {
             view_once_message_v2: MessageField::some(wrap(wa::Message {
                 audio_message: MessageField::some(wa::message::AudioMessage {
@@ -11091,15 +11010,15 @@ mod tests {
             })),
             ..Default::default()
         };
-        assert_eq!(classify(&audio(true), false), placeholder(OnceMedia::Voice));
-        assert_eq!(classify(&audio(false), false), placeholder(OnceMedia::Audio));
+        assert_eq!(classify(&audio(true)), placeholder(OnceMedia::Voice));
+        assert_eq!(classify(&audio(false)), placeholder(OnceMedia::Audio));
 
         assert!(matches!(
-            classify(&image(None), false),
+            classify(&image(None)),
             Some(Content::Image { .. })
         ));
         assert!(matches!(
-            classify(&image(Some(false)), false),
+            classify(&image(Some(false))),
             Some(Content::Image { .. })
         ));
         let buttons = wa::Message {
@@ -11115,7 +11034,7 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            !matches!(classify(&buttons, false), Some(Content::PhoneOnly { .. })),
+            !matches!(classify(&buttons), Some(Content::PhoneOnly { .. })),
             "interactive messages share the wrapper and stay interactive"
         );
     }
@@ -11185,7 +11104,7 @@ mod tests {
             ),
             ..Default::default()
         };
-        match classify(&message, false) {
+        match classify(&message) {
             Some(Content::Text { preview, .. }) => {
                 let preview = preview.expect("preview");
                 assert_eq!(preview.url, "https://spotifast.rocks/");
@@ -12056,7 +11975,6 @@ mod receipt_tests {
             presence_subscribed: HashSet::new(),
             download_folder: None,
             keep_chats_archived: true,
-            view_once_unlimited: false,
             ghost_mode: false,
             keep_deleted_messages: false,
             online_wanted: false,
@@ -12149,6 +12067,55 @@ mod receipt_tests {
         );
     }
 
+    /// Regression for #1: an archive the removed unlimited view-once setting
+    /// rewrote, after the first backfill already ran, gets its placeholders
+    /// back once.
+    #[test]
+    fn regression_1_unlimited_view_once_rows_return_to_the_placeholder() {
+        let (mut worker, _events, _commands, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Demo").unwrap();
+        let once = wa::Message {
+            image_message: MessageField::some(wa::message::ImageMessage {
+                mimetype: Some("image/jpeg".into()),
+                view_once: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut message = own_message("once", 1);
+        message.content = classify_base(once.get_base_message()).unwrap();
+        worker
+            .archive
+            .insert_message(&message, Some(&once.encode_to_vec()))
+            .unwrap();
+        worker.archive.set_meta("view_once_media", "1").unwrap();
+        worker.archive.set_meta("view_once_unlimited", "1").unwrap();
+
+        worker.backfill_view_once();
+
+        assert_eq!(
+            worker
+                .archive
+                .message(PEER, "once")
+                .unwrap()
+                .unwrap()
+                .content,
+            Content::PhoneOnly {
+                view_once: true,
+                live_location: false,
+                once: Some(crate::model::OnceMedia::Photo),
+            }
+        );
+        assert_eq!(
+            worker
+                .archive
+                .meta("view_once_unlimited")
+                .unwrap()
+                .as_deref(),
+            Some("0")
+        );
+    }
+
     #[test]
     fn archived_round_videos_become_notes_and_keep_their_rows() {
         let (mut worker, _events, _commands, _wa) = worker();
@@ -12172,7 +12139,7 @@ mod receipt_tests {
                 seconds,
                 gif,
                 ..
-            }) = classify(raw, false)
+            }) = classify(raw)
             else {
                 panic!("not a video");
             };
@@ -12439,12 +12406,15 @@ mod receipt_tests {
 
     #[test]
     fn history_keeps_ephemeral_metadata() {
-        let parsed = parse_conversation(wa::Conversation {
-            id: PEER.into(),
-            ephemeral_expiration: Some(7_776_000),
-            ephemeral_setting_timestamp: Some(1_700_000_000),
-            ..Default::default()
-        }, false, false);
+        let parsed = parse_conversation(
+            wa::Conversation {
+                id: PEER.into(),
+                ephemeral_expiration: Some(7_776_000),
+                ephemeral_setting_timestamp: Some(1_700_000_000),
+                ..Default::default()
+            },
+            false,
+        );
 
         assert_eq!(parsed.ephemeral_expiration, Some(7_776_000));
         assert_eq!(parsed.ephemeral_setting_timestamp, Some(1_700_000_000));
@@ -12492,45 +12462,48 @@ mod receipt_tests {
     fn history_applies_a_standalone_custom_reaction_from_another_sender() {
         let group = "123-456@g.us";
         let reactor = "12025550999@s.whatsapp.net";
-        let parsed = parse_conversation(wa::Conversation {
-            id: group.into(),
-            messages: vec![
-                history_entry(
-                    group,
-                    "photo",
-                    false,
-                    Some(PEER),
-                    wa::Message {
-                        conversation: Some("caption".into()),
-                        ..Default::default()
-                    },
-                    Vec::new(),
-                    None,
-                ),
-                history_entry(
-                    group,
-                    "react",
-                    false,
-                    Some(reactor),
-                    wa::Message {
-                        reaction_message: MessageField::some(wa::message::ReactionMessage {
-                            key: MessageField::some(wa::MessageKey {
-                                remote_jid: Some(group.into()),
-                                from_me: Some(false),
-                                id: Some("photo".into()),
-                                participant: Some(PEER.into()),
-                            }),
-                            text: Some("🏆".into()),
+        let parsed = parse_conversation(
+            wa::Conversation {
+                id: group.into(),
+                messages: vec![
+                    history_entry(
+                        group,
+                        "photo",
+                        false,
+                        Some(PEER),
+                        wa::Message {
+                            conversation: Some("caption".into()),
                             ..Default::default()
-                        }),
-                        ..Default::default()
-                    },
-                    Vec::new(),
-                    None,
-                ),
-            ],
-            ..Default::default()
-        }, false, false);
+                        },
+                        Vec::new(),
+                        None,
+                    ),
+                    history_entry(
+                        group,
+                        "react",
+                        false,
+                        Some(reactor),
+                        wa::Message {
+                            reaction_message: MessageField::some(wa::message::ReactionMessage {
+                                key: MessageField::some(wa::MessageKey {
+                                    remote_jid: Some(group.into()),
+                                    from_me: Some(false),
+                                    id: Some("photo".into()),
+                                    participant: Some(PEER.into()),
+                                }),
+                                text: Some("🏆".into()),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        },
+                        Vec::new(),
+                        None,
+                    ),
+                ],
+                ..Default::default()
+            },
+            false,
+        );
         assert!(parsed.messages.iter().all(|message| message.id != "react"));
         assert_eq!(parsed.reactions.len(), 1);
         let (mut worker, _events, _inbox, _wa) = worker();
@@ -12557,11 +12530,14 @@ mod receipt_tests {
     fn file_history_entries(worker: &mut Worker, messages: Vec<wa::HistorySyncMsg>) {
         worker.apply_history(
             ParsedHistory {
-                chats: vec![parse_conversation(wa::Conversation {
-                    id: PEER.into(),
-                    messages,
-                    ..Default::default()
-                }, false, false)],
+                chats: vec![parse_conversation(
+                    wa::Conversation {
+                        id: PEER.into(),
+                        messages,
+                        ..Default::default()
+                    },
+                    false,
+                )],
                 push_names: Vec::new(),
                 lids: Vec::new(),
                 stickers: Vec::new(),
@@ -12596,23 +12572,26 @@ mod receipt_tests {
         let absent_info = absent.message.as_option_mut().unwrap();
         absent_info.message = MessageField::none();
         absent_info.message_stub_type = Some(wa::web_message_info::StubType::CIPHERTEXT);
-        let parsed = parse_conversation(wa::Conversation {
-            id: PEER.into(),
-            messages: vec![
-                history_entry(PEER, "private-edit-id", false, None, edit, Vec::new(), None),
-                history_entry(
-                    PEER,
-                    "private-visible-id",
-                    false,
-                    None,
-                    wa::Message::text("Private fixture body"),
-                    Vec::new(),
-                    None,
-                ),
-                absent,
-            ],
-            ..Default::default()
-        }, false, false);
+        let parsed = parse_conversation(
+            wa::Conversation {
+                id: PEER.into(),
+                messages: vec![
+                    history_entry(PEER, "private-edit-id", false, None, edit, Vec::new(), None),
+                    history_entry(
+                        PEER,
+                        "private-visible-id",
+                        false,
+                        None,
+                        wa::Message::text("Private fixture body"),
+                        Vec::new(),
+                        None,
+                    ),
+                    absent,
+                ],
+                ..Default::default()
+            },
+            false,
+        );
         assert_eq!(parsed.diagnostics.entries, 3);
         assert_eq!(parsed.diagnostics.rekeyed_edit_snapshots, 1);
         assert_eq!(parsed.diagnostics.edit_snapshots, 1);
@@ -12708,7 +12687,7 @@ mod receipt_tests {
         assert!(message.edited);
         let raw = worker.archive.raw(PEER, "edited-reply").unwrap().unwrap();
         let raw = wa::Message::decode_from_slice(&raw).unwrap();
-        assert_eq!(classify(&raw, false), Some(Content::text("Updated fixture reply")));
+        assert_eq!(classify(&raw), Some(Content::text("Updated fixture reply")));
         assert_eq!(
             raw.message_context_info.as_option().unwrap().message_secret,
             Some(vec![7; 32])
@@ -12819,19 +12798,22 @@ mod receipt_tests {
             }),
             ..Default::default()
         };
-        let parsed = parse_conversation(wa::Conversation {
-            id: PEER.into(),
-            messages: vec![history_entry(
-                PEER,
-                "separate-edit-id",
-                false,
-                None,
-                raw,
-                Vec::new(),
-                None,
-            )],
-            ..Default::default()
-        }, false, false);
+        let parsed = parse_conversation(
+            wa::Conversation {
+                id: PEER.into(),
+                messages: vec![history_entry(
+                    PEER,
+                    "separate-edit-id",
+                    false,
+                    None,
+                    raw,
+                    Vec::new(),
+                    None,
+                )],
+                ..Default::default()
+            },
+            false,
+        );
         assert_eq!(parsed.messages.len(), 1);
         assert_eq!(parsed.messages[0].id, "original-id");
         assert_eq!(parsed.messages[0].content, Content::text("Updated fixture"));
@@ -12916,7 +12898,7 @@ mod receipt_tests {
                 assert_eq!(row.quoted.as_ref().unwrap().id, "quoted-fixture");
                 let raw = worker.archive.raw(PEER, &row.id).unwrap().unwrap();
                 assert_eq!(
-                    classify(&wa::Message::decode_from_slice(&raw).unwrap(), false),
+                    classify(&wa::Message::decode_from_slice(&raw).unwrap()),
                     Some(row.content.clone())
                 );
                 assert_eq!(message_secret_from_raw(&raw), Some(vec![7; 32]));
@@ -12947,30 +12929,33 @@ mod receipt_tests {
             (Some(""), Some(wa::Message::text("Fixture"))),
             (Some("original"), None),
         ] {
-            let parsed = parse_conversation(wa::Conversation {
-                id: PEER.into(),
-                messages: vec![history_entry(
-                    PEER,
-                    "edit-id",
-                    false,
-                    None,
-                    wa::Message {
-                        protocol_message: MessageField::some(wa::message::ProtocolMessage {
-                            r#type: Some(wa::message::protocol_message::Type::MESSAGE_EDIT),
-                            key: MessageField::some(wa::MessageKey {
-                                id: target.map(str::to_owned),
+            let parsed = parse_conversation(
+                wa::Conversation {
+                    id: PEER.into(),
+                    messages: vec![history_entry(
+                        PEER,
+                        "edit-id",
+                        false,
+                        None,
+                        wa::Message {
+                            protocol_message: MessageField::some(wa::message::ProtocolMessage {
+                                r#type: Some(wa::message::protocol_message::Type::MESSAGE_EDIT),
+                                key: MessageField::some(wa::MessageKey {
+                                    id: target.map(str::to_owned),
+                                    ..Default::default()
+                                }),
+                                edited_message: body.into(),
                                 ..Default::default()
                             }),
-                            edited_message: body.into(),
                             ..Default::default()
-                        }),
-                        ..Default::default()
-                    },
-                    Vec::new(),
-                    None,
-                )],
-                ..Default::default()
-            }, false, false);
+                        },
+                        Vec::new(),
+                        None,
+                    )],
+                    ..Default::default()
+                },
+                false,
+            );
             assert!(parsed.messages.is_empty());
             assert_eq!(parsed.diagnostics.invalid_edits, 1);
         }
@@ -12978,30 +12963,33 @@ mod receipt_tests {
 
     #[test]
     fn history_reads_aggregated_reactions_from_grouping_key() {
-        let parsed = parse_conversation(wa::Conversation {
-            id: PEER.into(),
-            messages: vec![history_entry(
-                PEER,
-                "photo",
-                false,
-                None,
-                wa::Message {
-                    conversation: Some("caption".into()),
-                    ..Default::default()
-                },
-                vec![wa::Reaction {
-                    key: MessageField::some(wa::MessageKey {
-                        from_me: Some(false),
-                        participant: Some(PEER.into()),
+        let parsed = parse_conversation(
+            wa::Conversation {
+                id: PEER.into(),
+                messages: vec![history_entry(
+                    PEER,
+                    "photo",
+                    false,
+                    None,
+                    wa::Message {
+                        conversation: Some("caption".into()),
                         ..Default::default()
-                    }),
-                    grouping_key: Some("🏆".into()),
-                    ..Default::default()
-                }],
-                None,
-            )],
-            ..Default::default()
-        }, false, false);
+                    },
+                    vec![wa::Reaction {
+                        key: MessageField::some(wa::MessageKey {
+                            from_me: Some(false),
+                            participant: Some(PEER.into()),
+                            ..Default::default()
+                        }),
+                        grouping_key: Some("🏆".into()),
+                        ..Default::default()
+                    }],
+                    None,
+                )],
+                ..Default::default()
+            },
+            false,
+        );
         assert_eq!(parsed.messages[0].reactions.len(), 1);
         assert_eq!(parsed.messages[0].reactions[0].2, "🏆");
         assert!(!parsed.messages[0].reactions[0].1);
@@ -13257,31 +13245,34 @@ mod receipt_tests {
     fn partial_group_history_receipts_do_not_override_the_phone_aggregate() {
         use wa::web_message_info::Status;
         let parsed = |chat: &str, status| {
-            parse_conversation(wa::Conversation {
-                id: chat.into(),
-                messages: vec![wa::HistorySyncMsg {
-                    message: MessageField::some(wa::WebMessageInfo {
-                        key: MessageField::some(wa::MessageKey {
-                            id: Some("history".into()),
-                            from_me: Some(true),
+            parse_conversation(
+                wa::Conversation {
+                    id: chat.into(),
+                    messages: vec![wa::HistorySyncMsg {
+                        message: MessageField::some(wa::WebMessageInfo {
+                            key: MessageField::some(wa::MessageKey {
+                                id: Some("history".into()),
+                                from_me: Some(true),
+                                ..Default::default()
+                            }),
+                            message: MessageField::some(wa::Message {
+                                conversation: Some("hello".into()),
+                                ..Default::default()
+                            }),
+                            status: Some(status),
+                            user_receipt: vec![wa::UserReceipt {
+                                user_jid: PEER.into(),
+                                read_timestamp: Some(123),
+                                ..Default::default()
+                            }],
                             ..Default::default()
                         }),
-                        message: MessageField::some(wa::Message {
-                            conversation: Some("hello".into()),
-                            ..Default::default()
-                        }),
-                        status: Some(status),
-                        user_receipt: vec![wa::UserReceipt {
-                            user_jid: PEER.into(),
-                            read_timestamp: Some(123),
-                            ..Default::default()
-                        }],
                         ..Default::default()
-                    }),
+                    }],
                     ..Default::default()
-                }],
-                ..Default::default()
-            }, false, false)
+                },
+                false,
+            )
         };
         assert_eq!(
             parsed("123-456@g.us", Status::SERVER_ACK).messages[0].status,
@@ -13305,33 +13296,36 @@ mod receipt_tests {
     fn history_receipts_date_direct_ticks_and_fill_group_message_info() {
         use wa::web_message_info::Status;
         let conversation = |chat: &str, status| {
-            parse_conversation(wa::Conversation {
-                id: chat.into(),
-                messages: vec![wa::HistorySyncMsg {
-                    message: MessageField::some(wa::WebMessageInfo {
-                        key: MessageField::some(wa::MessageKey {
-                            id: Some("history".into()),
-                            from_me: Some(true),
+            parse_conversation(
+                wa::Conversation {
+                    id: chat.into(),
+                    messages: vec![wa::HistorySyncMsg {
+                        message: MessageField::some(wa::WebMessageInfo {
+                            key: MessageField::some(wa::MessageKey {
+                                id: Some("history".into()),
+                                from_me: Some(true),
+                                ..Default::default()
+                            }),
+                            message: MessageField::some(wa::Message {
+                                conversation: Some("hello".into()),
+                                ..Default::default()
+                            }),
+                            message_timestamp: Some(90),
+                            status: Some(status),
+                            user_receipt: vec![wa::UserReceipt {
+                                user_jid: PEER.into(),
+                                receipt_timestamp: Some(100),
+                                read_timestamp: Some(123),
+                                ..Default::default()
+                            }],
                             ..Default::default()
                         }),
-                        message: MessageField::some(wa::Message {
-                            conversation: Some("hello".into()),
-                            ..Default::default()
-                        }),
-                        message_timestamp: Some(90),
-                        status: Some(status),
-                        user_receipt: vec![wa::UserReceipt {
-                            user_jid: PEER.into(),
-                            receipt_timestamp: Some(100),
-                            read_timestamp: Some(123),
-                            ..Default::default()
-                        }],
                         ..Default::default()
-                    }),
+                    }],
                     ..Default::default()
-                }],
-                ..Default::default()
-            }, false, false)
+                },
+                false,
+            )
         };
         let group = "123-456@g.us";
         let (mut worker, _events, _inbox, _wa) = worker();
@@ -13363,33 +13357,36 @@ mod receipt_tests {
     fn a_zero_history_receipt_time_neither_reads_nor_dates_a_message() {
         use wa::web_message_info::Status;
         let conversation = |id: &str, status| {
-            parse_conversation(wa::Conversation {
-                id: PEER.into(),
-                messages: vec![wa::HistorySyncMsg {
-                    message: MessageField::some(wa::WebMessageInfo {
-                        key: MessageField::some(wa::MessageKey {
-                            id: Some(id.into()),
-                            from_me: Some(true),
+            parse_conversation(
+                wa::Conversation {
+                    id: PEER.into(),
+                    messages: vec![wa::HistorySyncMsg {
+                        message: MessageField::some(wa::WebMessageInfo {
+                            key: MessageField::some(wa::MessageKey {
+                                id: Some(id.into()),
+                                from_me: Some(true),
+                                ..Default::default()
+                            }),
+                            message: MessageField::some(wa::Message {
+                                conversation: Some("hello".into()),
+                                ..Default::default()
+                            }),
+                            message_timestamp: Some(90),
+                            status: Some(status),
+                            user_receipt: vec![wa::UserReceipt {
+                                user_jid: PEER.into(),
+                                receipt_timestamp: Some(100),
+                                read_timestamp: Some(0),
+                                ..Default::default()
+                            }],
                             ..Default::default()
                         }),
-                        message: MessageField::some(wa::Message {
-                            conversation: Some("hello".into()),
-                            ..Default::default()
-                        }),
-                        message_timestamp: Some(90),
-                        status: Some(status),
-                        user_receipt: vec![wa::UserReceipt {
-                            user_jid: PEER.into(),
-                            receipt_timestamp: Some(100),
-                            read_timestamp: Some(0),
-                            ..Default::default()
-                        }],
                         ..Default::default()
-                    }),
+                    }],
                     ..Default::default()
-                }],
-                ..Default::default()
-            }, false, false)
+                },
+                false,
+            )
         };
         // A contact who hides read receipts: the phone says delivered.
         let hidden = conversation("hidden", Status::DELIVERY_ACK);
@@ -13468,30 +13465,33 @@ mod receipt_tests {
         );
 
         // And again through history sync, which files messages on its own path.
-        let history = parse_conversation(wa::Conversation {
-            id: PEER.into(),
-            messages: vec![wa::HistorySyncMsg {
-                message: MessageField::some(wa::WebMessageInfo {
-                    key: MessageField::some(wa::MessageKey {
-                        id: Some("photo".into()),
-                        from_me: Some(false),
-                        ..Default::default()
-                    }),
-                    message: MessageField::some(wa::Message {
-                        image_message: MessageField::some(wa::message::ImageMessage {
-                            mimetype: Some("image/jpeg".into()),
-                            file_length: Some(10),
+        let history = parse_conversation(
+            wa::Conversation {
+                id: PEER.into(),
+                messages: vec![wa::HistorySyncMsg {
+                    message: MessageField::some(wa::WebMessageInfo {
+                        key: MessageField::some(wa::MessageKey {
+                            id: Some("photo".into()),
+                            from_me: Some(false),
                             ..Default::default()
                         }),
+                        message: MessageField::some(wa::Message {
+                            image_message: MessageField::some(wa::message::ImageMessage {
+                                mimetype: Some("image/jpeg".into()),
+                                file_length: Some(10),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                        message_timestamp: Some(100),
                         ..Default::default()
                     }),
-                    message_timestamp: Some(100),
                     ..Default::default()
-                }),
+                }],
                 ..Default::default()
-            }],
-            ..Default::default()
-        }, false, false);
+            },
+            false,
+        );
         worker.apply_history(
             ParsedHistory {
                 chats: vec![history],
@@ -13554,12 +13554,15 @@ mod receipt_tests {
 
     fn history(unread: u32) -> ParsedHistory {
         ParsedHistory {
-            chats: vec![parse_conversation(wa::Conversation {
-                id: PEER.into(),
-                unread_count: Some(unread),
-                conversation_timestamp: Some(200),
-                ..Default::default()
-            }, false, false)],
+            chats: vec![parse_conversation(
+                wa::Conversation {
+                    id: PEER.into(),
+                    unread_count: Some(unread),
+                    conversation_timestamp: Some(200),
+                    ..Default::default()
+                },
+                false,
+            )],
             push_names: Vec::new(),
             lids: Vec::new(),
             stickers: Vec::new(),
@@ -13568,31 +13571,40 @@ mod receipt_tests {
 
     #[test]
     fn history_preserves_pin_time_and_distinguishes_missing_mute_metadata() {
-        let chat = parse_conversation(wa::Conversation {
-            id: PEER.into(),
-            pinned: Some(1_700_000_000),
-            mute_end_time: Some(1_800_000_000),
-            ..Default::default()
-        }, false, false);
+        let chat = parse_conversation(
+            wa::Conversation {
+                id: PEER.into(),
+                pinned: Some(1_700_000_000),
+                mute_end_time: Some(1_800_000_000),
+                ..Default::default()
+            },
+            false,
+        );
         assert_eq!(chat.pinned_at, Some(1_700_000_000_000));
         assert_eq!(chat.muted_until, Some(Some(1_800_000_000)));
         assert_eq!(chat.locked, None, "absence must preserve existing state");
-        let chat = parse_conversation(wa::Conversation {
-            id: PEER.into(),
-            locked: Some(true),
-            ..Default::default()
-        }, false, false);
+        let chat = parse_conversation(
+            wa::Conversation {
+                id: PEER.into(),
+                locked: Some(true),
+                ..Default::default()
+            },
+            false,
+        );
         assert_eq!(chat.locked, Some(true));
         for (end, expected) in [
             (None, None),
             (Some(0), Some(None)),
             (Some(u64::MAX), Some(Some(0))),
         ] {
-            let chat = parse_conversation(wa::Conversation {
-                id: PEER.into(),
-                mute_end_time: end,
-                ..Default::default()
-            }, false, false);
+            let chat = parse_conversation(
+                wa::Conversation {
+                    id: PEER.into(),
+                    mute_end_time: end,
+                    ..Default::default()
+                },
+                false,
+            );
             assert_eq!(chat.muted_until, expected);
         }
     }
@@ -14543,22 +14555,25 @@ mod receipt_tests {
         let (mut worker, _events, _inbox, _wa) = worker();
         worker.store_message(incoming("new", 300), None, None);
         worker.on_receipt(&receipt(PEER, &["old"], ReceiptType::ReadSelf));
-        let parsed = parse_conversation(wa::Conversation {
-            id: PEER.into(),
-            messages: vec![history_entry(
-                PEER,
-                "old",
-                false,
-                None,
-                wa::Message {
-                    conversation: Some("hi".into()),
-                    ..Default::default()
-                },
-                Vec::new(),
-                None,
-            )],
-            ..Default::default()
-        }, false, false);
+        let parsed = parse_conversation(
+            wa::Conversation {
+                id: PEER.into(),
+                messages: vec![history_entry(
+                    PEER,
+                    "old",
+                    false,
+                    None,
+                    wa::Message {
+                        conversation: Some("hi".into()),
+                        ..Default::default()
+                    },
+                    Vec::new(),
+                    None,
+                )],
+                ..Default::default()
+            },
+            false,
+        );
         worker.apply_history(
             ParsedHistory {
                 chats: vec![parsed],
