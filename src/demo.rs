@@ -6162,7 +6162,16 @@ mod tests {
     /// and in each layout: GNOME's buttons at the right or the left, and
     /// Windows' taller row. Headers that reach a corner leave the buttons
     /// room beside their own controls, or move them down when narrow.
+    ///
+    /// Not on macOS, which never draws them: its headers keep the traffic
+    /// lights' layout under any preview, and drag the window from their top
+    /// (fastframe-titlebar's drag area, which senses clicks) wherever the
+    /// caption buttons would stand.
     #[test]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "macOS has the traffic lights, never the drawn caption buttons"
+    )]
     fn header_controls_keep_clear_of_the_drawn_caption_buttons() {
         use fastframe_titlebar::Footprint;
         let footprints = [
@@ -16048,56 +16057,73 @@ mod tests {
         assert!(reached_hidden, "Tab reached chats that were out of view");
     }
 
+    /// The same with the list hidden, at the window's least height: the
+    /// chats' avatars scroll between the rail's groups, and the macOS layout,
+    /// which starts the rail under the traffic lights, leaves them least.
     #[test]
     fn tab_scrolls_a_focused_collapsed_avatar_into_view() {
-        let mut app = app();
-        apply_flags(&mut app, Some("settings,rail"));
-        let ctx = egui::Context::default();
-        app.attach(&ctx);
-        let height = 300.0;
-        for _ in 0..3 {
-            frame_sized(&mut app, &ctx, height, Vec::new());
-        }
-        let avatar = |ctx: &egui::Context, id: &str| {
-            ctx.data(|data| data.get_temp::<egui::Rect>(crate::ui::chats::compact_chat_id(id)))
-        };
-        let ids: Vec<String> = app.chats.iter().map(|chat| chat.id.clone()).collect();
-        let hidden: Vec<&String> = ids
-            .iter()
-            .filter(|id| avatar(&ctx, id).is_none_or(|rect| rect.top() >= height))
-            .collect();
-        assert!(
-            !hidden.is_empty(),
-            "the window is short enough to hide avatars"
-        );
-        let mut reached_hidden = false;
-        for _ in 0..40 {
-            frame_sized(&mut app, &ctx, height, tab());
+        for macos in [false, true] {
+            let mut app = app();
+            apply_flags(&mut app, Some("settings,rail"));
+            let ctx = egui::Context::default();
+            app.attach(&ctx);
+            if macos {
+                crate::theme::preview_macos(&ctx);
+            }
+            // `main`'s least window height.
+            let height = 300.0;
             for _ in 0..3 {
                 frame_sized(&mut app, &ctx, height, Vec::new());
             }
-            let Some(focused) = ctx
-                .memory(|memory| memory.focused())
-                .and_then(|id| ctx.read_response(id))
-            else {
-                continue;
+            let avatar = |ctx: &egui::Context, id: &str| {
+                ctx.data(|data| data.get_temp::<egui::Rect>(crate::ui::chats::compact_chat_id(id)))
             };
-            // Settings has its own scrolling; only the rail is under test.
-            if !ids
+            let ids: Vec<String> = app.chats.iter().map(|chat| chat.id.clone()).collect();
+            let hidden: Vec<&String> = ids
                 .iter()
-                .any(|id| avatar(&ctx, id).is_some_and(|rect| rect == focused.rect))
-            {
-                continue;
-            }
-            assert_eq!(
-                focused.interact_rect, focused.rect,
-                "the focused avatar is fully visible"
+                .filter(|id| avatar(&ctx, id).is_none_or(|rect| rect.top() >= height))
+                .collect();
+            assert!(
+                !hidden.is_empty(),
+                "{macos}: the window is short enough to hide avatars"
             );
-            reached_hidden |= hidden
-                .iter()
-                .any(|id| avatar(&ctx, id).is_some_and(|rect| rect == focused.rect));
+            let mut reached_hidden = false;
+            for _ in 0..40 {
+                frame_sized(&mut app, &ctx, height, tab());
+                for _ in 0..3 {
+                    frame_sized(&mut app, &ctx, height, Vec::new());
+                }
+                let Some(focused) = ctx
+                    .memory(|memory| memory.focused())
+                    .and_then(|id| ctx.read_response(id))
+                else {
+                    continue;
+                };
+                // Settings has its own scrolling; only the rail is under test.
+                if !ids
+                    .iter()
+                    .any(|id| avatar(&ctx, id).is_some_and(|rect| rect == focused.rect))
+                {
+                    continue;
+                }
+                assert_eq!(
+                    focused.interact_rect, focused.rect,
+                    "{macos}: the focused avatar is fully visible"
+                );
+                assert!(
+                    focused.rect.bottom() <= height,
+                    "{macos}: inside the window: {:?}",
+                    focused.rect
+                );
+                reached_hidden |= hidden
+                    .iter()
+                    .any(|id| avatar(&ctx, id).is_some_and(|rect| rect == focused.rect));
+            }
+            assert!(
+                reached_hidden,
+                "{macos}: Tab reached avatars that were out of view"
+            );
         }
-        assert!(reached_hidden, "Tab reached avatars that were out of view");
     }
 
     /// Records the images the UI asks for, answering at once so a frame can be
@@ -16987,6 +17013,14 @@ mod bubble_detail_tests {
     /// by 800 window.
     #[test]
     fn messages_balloons_tail_only_the_last_of_each_run() {
+        // These runs belong to one day. Near midnight a real clock puts a
+        // day boundary between them, correctly giving another bubble a tail.
+        let _clock = crate::util::fixed_clock::set(crate::util::fixed_clock::Clock {
+            // 14:00 UTC on Wednesday 11 March 2026.
+            now: 1_773_237_600,
+            zone: jiff::tz::TimeZone::UTC,
+            twelve_hour: false,
+        });
         const SIZE: egui::Vec2 = egui::vec2(1280.0, 800.0);
         let reach = crate::ui::widgets::balloon::TIP[0] * crate::ui::widgets::MESSAGES_SCALE;
         for page in ["bubbles,messages", "bubbles,messages-light"] {
@@ -17970,7 +18004,8 @@ mod rail_tests {
             );
             assert_eq!(settings.size(), egui::vec2(36.0, 36.0));
             assert_eq!(me.size(), egui::vec2(32.0, 32.0));
-            if macos {
+            // A Mac lays out its own way whichever the preview says.
+            if crate::theme::macos_chrome(&ctx) {
                 assert!(
                     top[0].top() >= 36.0 && top[0].top() < 60.0,
                     "just below the traffic lights: {:?}",
@@ -18016,6 +18051,133 @@ mod rail_tests {
             );
             // Under Show the chat list, which takes a cell of its own.
             assert!(avatar.top() >= show.bottom());
+        }
+    }
+
+    /// At the minimum window height, Tab and Shift+Tab reveal every rail
+    /// control, including the bottom group, without crossing the title bar.
+    #[test]
+    fn tab_reveals_every_rail_control_in_a_short_window() {
+        for macos in [false, true] {
+            for page in ["chat", "rail"] {
+                for reverse in [false, true] {
+                    let (mut app, ctx) = open(page, macos);
+                    let size = egui::vec2(1180.0, 300.0);
+                    for _ in 0..3 {
+                        frame_at(&mut app, &ctx, size, Vec::new());
+                    }
+                    let mut expected = vec![
+                        Stop::Chats,
+                        Stop::Calls,
+                        Stop::Starred,
+                        Stop::Archived,
+                        Stop::Locked,
+                        Stop::Settings,
+                        Stop::Profile,
+                    ];
+                    if page == "rail" {
+                        expected.push(Stop::Sidebar);
+                    }
+                    for stop in &expected {
+                        assert!(stop_rect(&ctx, *stop).is_some(), "{stop:?} is offered");
+                    }
+                    ctx.memory_mut(|memory| {
+                        memory.request_focus(rail::destination_id(Destination::Chats));
+                    });
+                    let mut reached = std::collections::BTreeSet::new();
+                    for _ in 0..40 {
+                        frame_at(
+                            &mut app,
+                            &ctx,
+                            size,
+                            vec![egui::Event::Key {
+                                key: egui::Key::Tab,
+                                physical_key: None,
+                                pressed: true,
+                                repeat: false,
+                                modifiers: if reverse {
+                                    egui::Modifiers::SHIFT
+                                } else {
+                                    egui::Modifiers::NONE
+                                },
+                            }],
+                        );
+                        for _ in 0..3 {
+                            frame_at(&mut app, &ctx, size, Vec::new());
+                        }
+                        let focused = ctx.memory(|memory| memory.focused());
+                        let Some((stop, id)) = focus::stops(&ctx)
+                            .into_iter()
+                            .find(|(stop, id)| Some(*id) == focused && expected.contains(stop))
+                        else {
+                            continue;
+                        };
+                        let response = ctx.read_response(id).unwrap();
+                        let mut viewport = rail_rect(&ctx).unwrap();
+                        if crate::theme::traffic_light_inset(&ctx) > 0.0 {
+                            viewport.min.y += crate::theme::TOP_BAR_HEIGHT / 2.0 + 12.0;
+                        }
+                        assert_eq!(
+                            response.interact_rect, response.rect,
+                            "{page}, macOS={macos}, reverse={reverse}: {stop:?} is fully visible"
+                        );
+                        assert!(
+                            viewport.contains_rect(response.rect),
+                            "{stop:?} stays in the rail below the title bar"
+                        );
+                        reached.insert(stop);
+                    }
+                    assert_eq!(reached, expected.into_iter().collect());
+                }
+            }
+        }
+    }
+
+    /// Wheel scrolling reaches the account button at the minimum height;
+    /// growing the window restores the usual top and bottom positions.
+    #[test]
+    fn a_short_rail_scrolls_and_resets_when_the_window_grows() {
+        for macos in [false, true] {
+            for page in ["chat", "rail"] {
+                let (mut app, ctx) = open(page, macos);
+                let chats = destination_rect(&ctx, Destination::Chats);
+                let profile = stop_rect(&ctx, Stop::Profile).unwrap();
+                let size = egui::vec2(1180.0, 300.0);
+                for _ in 0..3 {
+                    frame_at(&mut app, &ctx, size, Vec::new());
+                }
+                assert!(stop_rect(&ctx, Stop::Profile).unwrap().bottom() > size.y);
+                let pointer = destination_rect(&ctx, Destination::Calls).center();
+                frame_at(
+                    &mut app,
+                    &ctx,
+                    size,
+                    vec![
+                        egui::Event::PointerMoved(pointer),
+                        egui::Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta: egui::vec2(0.0, -600.0),
+                            modifiers: egui::Modifiers::NONE,
+                            phase: egui::TouchPhase::Move,
+                        },
+                    ],
+                );
+                for _ in 0..30 {
+                    frame_at(&mut app, &ctx, size, Vec::new());
+                }
+                let id = focus::control(&ctx, Stop::Profile).unwrap();
+                let response = ctx.read_response(id).unwrap();
+                assert_eq!(
+                    response.interact_rect, response.rect,
+                    "{page}, macOS={macos}: the account button is fully visible after scrolling"
+                );
+                assert!(rail_rect(&ctx).unwrap().contains_rect(response.rect));
+                for _ in 0..3 {
+                    frame(&mut app, &ctx, 1180.0, Vec::new());
+                }
+                assert_eq!(destination_rect(&ctx, Destination::Chats), chats);
+                assert_eq!(stop_rect(&ctx, Stop::Profile), Some(profile));
+            }
         }
     }
 
