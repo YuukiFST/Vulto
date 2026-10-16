@@ -2122,12 +2122,12 @@ impl Worker {
     /// file change, and only their content: an edit flag stays as it was.
     fn backfill_view_once(&mut self) {
         const KEY: &str = "view_once_media";
-        // The fork's former unlimited view-once setting filed view-once media
-        // as attachments, which never download either: those rows go back to
-        // the placeholder once.
-        const UNLIMITED_KEY: &str = "view_once_unlimited";
-        let was_unlimited = self.archive.meta(UNLIMITED_KEY).ok().flatten().as_deref() == Some("1");
-        if !was_unlimited && self.archive.meta(KEY).ok().flatten().as_deref() == Some("1") {
+        // Vulto's removed unlimited view-once setting (#1) filed view-once
+        // media as attachments, which never download either, after this
+        // backfill had already run: one more pass turns them back.
+        const UNLIMITED_KEY: &str = "view_once_unlimited_reverted";
+        let done = |key| self.archive.meta(key).ok().flatten().as_deref() == Some("1");
+        if done(KEY) && done(UNLIMITED_KEY) {
             return;
         }
         let rows = match self.archive.media_with_raw() {
@@ -2164,7 +2164,7 @@ impl Worker {
             }
         }
         let _ = self.archive.set_meta(KEY, "1");
-        let _ = self.archive.set_meta(UNLIMITED_KEY, "0");
+        let _ = self.archive.set_meta(UNLIMITED_KEY, "1");
         if updated > 0 {
             log::info!("marked {updated} archived messages as view once");
             self.emit_chats();
@@ -16706,9 +16706,9 @@ mod receipt_tests {
         );
     }
 
-    /// Regression for #1: an archive the removed unlimited view-once setting
-    /// rewrote, after the first backfill already ran, gets its placeholders
-    /// back once.
+    /// Regression for #1: view-once media the removed unlimited setting filed
+    /// as a photo, after the first backfill had run, becomes the placeholder
+    /// again. That setting never wrote a meta key of its own.
     #[test]
     fn regression_1_unlimited_view_once_rows_return_to_the_placeholder() {
         let (mut worker, _events, _commands, _wa) = worker();
@@ -16727,7 +16727,6 @@ mod receipt_tests {
             .insert_message(&message, Some(&once.encode_to_vec()))
             .unwrap();
         worker.archive.set_meta("view_once_media", "1").unwrap();
-        worker.archive.set_meta("view_once_unlimited", "1").unwrap();
 
         worker.backfill_view_once();
 
@@ -16747,10 +16746,10 @@ mod receipt_tests {
         assert_eq!(
             worker
                 .archive
-                .meta("view_once_unlimited")
+                .meta("view_once_unlimited_reverted")
                 .unwrap()
                 .as_deref(),
-            Some("0")
+            Some("1")
         );
     }
 
