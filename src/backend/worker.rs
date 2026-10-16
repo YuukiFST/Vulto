@@ -2124,10 +2124,11 @@ impl Worker {
         const KEY: &str = "view_once_media";
         // Vulto's removed unlimited view-once setting (#1) filed view-once
         // media as attachments, which never download either, after this
-        // backfill had already run: one more pass turns them back.
-        const UNLIMITED_KEY: &str = "view_once_unlimited_reverted";
+        // backfill had already run: one more pass turns them back. A key of
+        // its own keeps it apart from upstream's.
+        const REVERTED_KEY: &str = "view_once_unlimited_reverted";
         let done = |key| self.archive.meta(key).ok().flatten().as_deref() == Some("1");
-        if done(KEY) && done(UNLIMITED_KEY) {
+        if done(KEY) && done(REVERTED_KEY) {
             return;
         }
         let rows = match self.archive.media_with_raw() {
@@ -2164,7 +2165,7 @@ impl Worker {
             }
         }
         let _ = self.archive.set_meta(KEY, "1");
-        let _ = self.archive.set_meta(UNLIMITED_KEY, "1");
+        let _ = self.archive.set_meta(REVERTED_KEY, "1");
         if updated > 0 {
             log::info!("marked {updated} archived messages as view once");
             self.emit_chats();
@@ -16708,49 +16709,56 @@ mod receipt_tests {
 
     /// Regression for #1: view-once media the removed unlimited setting filed
     /// as a photo, after the first backfill had run, becomes the placeholder
-    /// again. That setting never wrote a meta key of its own.
+    /// again. That setting never wrote a meta key of its own. Ordinary photos
+    /// and files already on disk stay, and a second start changes nothing.
     #[test]
     fn regression_1_unlimited_view_once_rows_return_to_the_placeholder() {
         let (mut worker, _events, _commands, _wa) = worker();
         worker.archive.ensure_chat(PEER, "Demo").unwrap();
-        let mut once = wa::Message::default();
-        once.image_message = MessageField::some({
-            let mut proto = wa::message::ImageMessage::default();
-            proto.mimetype = Some("image/jpeg".into());
-            proto.view_once = Some(true);
+        let image = |view_once| {
+            let mut proto = wa::Message::default();
+            proto.image_message = MessageField::some({
+                let mut proto = wa::message::ImageMessage::default();
+                proto.mimetype = Some("image/jpeg".into());
+                proto.view_once = view_once;
+                proto
+            });
             proto
-        });
-        let mut message = own_message("once", 1);
-        message.content = classify_base(once.get_base_message()).unwrap();
-        worker
-            .archive
-            .insert_message(&message, Some(&once.encode_to_vec()))
-            .unwrap();
+        };
+        let once = image(Some(true));
+        let plain = image(None);
+        for (id, raw, path) in [
+            ("once", &once, None),
+            ("once-on-disk", &once, Some("/fixture/once.jpg")),
+            ("plain", &plain, None),
+        ] {
+            let mut message = own_message(id, 1);
+            let Some(Content::Image { mut media, caption }) = classify_base(raw.get_base_message())
+            else {
+                panic!("not an image");
+            };
+            media.path = path.map(std::path::PathBuf::from);
+            // Filed as an ordinary photo while unlimited view-once was on.
+            message.content = Content::Image { caption, media };
+            worker
+                .archive
+                .insert_message(&message, Some(&raw.encode_to_vec()))
+                .unwrap();
+        }
         worker.archive.set_meta("view_once_media", "1").unwrap();
+        let placeholder = Content::PhoneOnly {
+            view_once: true,
+            live_location: false,
+            once: Some(crate::model::OnceMedia::Photo),
+        };
 
-        worker.backfill_view_once();
-
-        assert_eq!(
-            worker
-                .archive
-                .message(PEER, "once")
-                .unwrap()
-                .unwrap()
-                .content,
-            Content::PhoneOnly {
-                view_once: true,
-                live_location: false,
-                once: Some(crate::model::OnceMedia::Photo),
-            }
-        );
-        assert_eq!(
-            worker
-                .archive
-                .meta("view_once_unlimited_reverted")
-                .unwrap()
-                .as_deref(),
-            Some("1")
-        );
+        for _ in 0..2 {
+            worker.backfill_view_once();
+            let stored = |id: &str| worker.archive.message(PEER, id).unwrap().unwrap().content;
+            assert_eq!(stored("once"), placeholder);
+            assert!(matches!(stored("once-on-disk"), Content::Image { .. }));
+            assert!(matches!(stored("plain"), Content::Image { .. }));
+        }
     }
 
     #[test]
