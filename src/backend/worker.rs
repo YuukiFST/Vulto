@@ -16733,13 +16733,19 @@ mod receipt_tests {
             ("plain", &plain, None),
         ] {
             let mut message = own_message(id, 1);
-            let Some(Content::Image { mut media, caption }) = classify_base(raw.get_base_message())
+            let Some(Content::Image {
+                mut media, caption, ..
+            }) = classify_base(raw.get_base_message())
             else {
                 panic!("not an image");
             };
             media.path = path.map(std::path::PathBuf::from);
             // Filed as an ordinary photo while unlimited view-once was on.
-            message.content = Content::Image { caption, media };
+            message.content = Content::Image {
+                caption,
+                media,
+                motion: None,
+            };
             worker
                 .archive
                 .insert_message(&message, Some(&raw.encode_to_vec()))
